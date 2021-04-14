@@ -646,6 +646,16 @@ extern "C"
     void plist_to_xml(plist_t plist, char **plist_xml, uint32_t * length);
 
     /**
+     * Export the #plist_t structure to XML format.
+     *
+     * @param plist the root node to export
+     * @param plist_json a pointer to a C-string. This function allocates the memory,
+     *              caller is responsible for freeing it. Data is UTF-8 encoded.
+     * @param length a pointer to an uint32_t variable. Represents the length of the allocated buffer.
+     */
+    void plist_to_json(plist_t plist, char **plist_json, uint32_t * length);
+
+    /**
      * Frees the memory allocated by plist_to_xml().
      *
      * @param plist_xml The buffer allocated by plist_to_xml().

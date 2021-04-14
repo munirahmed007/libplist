@@ -69,6 +69,7 @@
 #define XPLIST_DICT	"dict"
 #define XPLIST_DICT_LEN 4
 
+
 #define MAC_EPOCH 978307200
 
 #define MAX_DATA_BYTES_PER_LINE(__i) (((76 - ((__i) << 3)) >> 2) * 3)
@@ -77,6 +78,9 @@ static const char XML_PLIST_PROLOG[] = "<?xml version=\"1.0\" encoding=\"UTF-8\"
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
 <plist version=\"1.0\">\n";
 static const char XML_PLIST_EPILOG[] = "</plist>\n";
+
+static const char JSON_PLIST_PROLOG[] = "{\n";
+static const char JSON_PLIST_EPILOG[] = "}\n";
 
 #ifdef DEBUG
 static int plist_xml_debug = 0;
@@ -371,6 +375,272 @@ static void node_to_xml(node_t* node, bytearray_t **outbuf, uint32_t depth)
     str_buf_append(*outbuf, "\n", 1);
 }
 
+static void node_to_json(node_t* node, bytearray_t **outbuf, uint32_t depth, char addComa)
+{
+    plist_data_t node_data = NULL;
+    
+    char isStruct = FALSE;
+    char isKeyNode = FALSE;
+    const char *tag = NULL;
+    size_t tag_len = 0;
+    char *val = NULL;
+    size_t val_len = 0;
+
+    uint32_t i = 0;
+
+    if (!node)
+        return;
+
+    node_data = plist_get_data(node);
+
+    switch (node_data->type)
+    {
+    case PLIST_BOOLEAN:
+    {
+        if (node_data->boolval) {
+            tag = XPLIST_TRUE;
+            tag_len = XPLIST_TRUE_LEN;
+        } else {
+            tag = XPLIST_FALSE;
+            tag_len = XPLIST_FALSE_LEN;
+        }
+    }
+    break;
+
+    case PLIST_UINT:
+        tag = XPLIST_INT;
+        tag_len = XPLIST_INT_LEN;
+        val = (char*)malloc(64);
+        if (node_data->length == 16) {
+            val_len = snprintf(val, 64, "%"PRIu64, node_data->intval);
+        } else {
+            val_len = snprintf(val, 64, "%"PRIi64, node_data->intval);
+        }
+        break;
+
+    case PLIST_REAL:
+        tag = XPLIST_REAL;
+        tag_len = XPLIST_REAL_LEN;
+        val = (char*)malloc(64);
+        val_len = dtostr(val, 64, node_data->realval);
+        break;
+
+    case PLIST_STRING:
+        tag = XPLIST_STRING;
+        tag_len = XPLIST_STRING_LEN;
+        /* contents processed directly below */
+        break;
+
+    case PLIST_KEY:
+        tag = XPLIST_KEY;
+        tag_len = XPLIST_KEY_LEN;
+        /* contents processed directly below */
+        break;
+
+    case PLIST_DATA:
+        tag = XPLIST_DATA;
+        tag_len = XPLIST_DATA_LEN;
+        /* contents processed directly below */
+        break;
+    case PLIST_ARRAY:
+        tag = XPLIST_ARRAY;
+        tag_len = XPLIST_ARRAY_LEN;
+        isStruct = (node->children) ? TRUE : FALSE;
+        break;
+    case PLIST_DICT:
+        tag = XPLIST_DICT;
+        tag_len = XPLIST_DICT_LEN;
+        isStruct = (node->children) ? TRUE : FALSE;
+        break;
+    case PLIST_DATE:
+        tag = XPLIST_DATE;
+        tag_len = XPLIST_DATE_LEN;
+        {
+            Time64_T timev = (Time64_T)node_data->realval + MAC_EPOCH;
+            struct TM _btime;
+            struct TM *btime = gmtime64_r(&timev, &_btime);
+            if (btime) {
+                val = (char*)calloc(1, 24);
+                struct tm _tmcopy;
+                copy_TM64_to_tm(btime, &_tmcopy);
+                val_len = strftime(val, 24, "%Y-%m-%dT%H:%M:%SZ", &_tmcopy);
+                if (val_len <= 0) {
+                    free (val);
+                    val = NULL;
+                }
+            }
+        }
+        break;
+    case PLIST_UID:
+        tag = XPLIST_DICT;
+        tag_len = XPLIST_DICT_LEN;
+        val = (char*)malloc(64);
+        if (node_data->length == 16) {
+            val_len = snprintf(val, 64, "%"PRIu64, node_data->intval);
+        } else {
+            val_len = snprintf(val, 64, "%"PRIi64, node_data->intval);
+        }
+        break;
+    default:
+        break;
+    }
+
+    if (node_data->type == PLIST_KEY) {
+        isKeyNode = TRUE;
+        for (i = 0; i < depth; i++) {
+            str_buf_append(*outbuf, "\t", 1);
+        }
+        size_t j;
+        size_t len;
+        off_t start = 0;
+        off_t cur = 0;
+        len = node_data->length;
+        for (j = 0; j < len; j++) {
+            switch (node_data->strval[j]) {
+            case '.':
+            case '-':
+                str_buf_append(*outbuf, node_data->strval + start, cur - start);
+                str_buf_append(*outbuf, "_", 1);
+                start = cur+1;
+                break;
+            default:
+                break;
+            }
+            cur++;
+        }
+        str_buf_append(*outbuf, node_data->strval + start, cur - start);
+        str_buf_append(*outbuf, ":", strlen(":"));
+    }
+    else if (node_data->type == PLIST_BOOLEAN) {
+        str_buf_append(*outbuf, tag, tag_len);
+    }
+    else if (node_data->type == PLIST_STRING) {
+        size_t j;
+        size_t len;
+        off_t start = 0;
+        off_t cur = 0;
+
+        len = node_data->length;
+        for (j = 0; j < len; j++) {
+            switch (node_data->strval[j]) {
+            case '\"':
+                str_buf_append(*outbuf, node_data->strval + start, cur - start);
+                str_buf_append(*outbuf, "\\\"", strlen("\\\""));
+                start = cur+1;
+                break;
+            case '\\':
+                str_buf_append(*outbuf, node_data->strval + start, cur - start);
+                str_buf_append(*outbuf, "\\\\", strlen("\\\\"));
+                start = cur+1;
+                break;
+            case '\t':
+                str_buf_append(*outbuf, node_data->strval + start, cur - start);
+                str_buf_append(*outbuf, "\\t", strlen("\\t"));
+                start = cur+1;
+                break;
+            case '\b':
+                str_buf_append(*outbuf, node_data->strval + start, cur - start);
+                str_buf_append(*outbuf, "\\b", strlen("\\b"));
+                start = cur+1;
+                break;
+            case '\f':
+                    str_buf_append(*outbuf, node_data->strval + start, cur - start);
+                    str_buf_append(*outbuf, "\\f", strlen("\\f"));
+                    start = cur+1;
+                    break;
+            case '\r':
+                    str_buf_append(*outbuf, node_data->strval + start, cur - start);
+                    str_buf_append(*outbuf, "\\r", strlen("\\r"));
+                    start = cur+1;
+                    break;
+            case '\n':
+                    str_buf_append(*outbuf, node_data->strval + start, cur - start);
+                    str_buf_append(*outbuf, "\\n", strlen("\\n"));
+                    start = cur+1;
+                    break;
+            default:
+                break;
+            }
+            cur++;
+        }
+        str_buf_append(*outbuf, "\"", 1);
+        str_buf_append(*outbuf, node_data->strval + start, cur - start);
+        str_buf_append(*outbuf, "\"", 1);
+    } else if (node_data->type == PLIST_DATA) {
+        if (node_data->length > 0) {
+            uint32_t j = 0;
+            uint32_t indent = 1;
+            uint32_t maxread = MAX_DATA_BYTES_PER_LINE(indent);
+            size_t count = 0;
+            size_t amount = (node_data->length / 3 * 4) + 4 + (((node_data->length / maxread) + 1) * (indent+1));
+            if ((*outbuf)->len + amount > (*outbuf)->capacity) {
+                str_buf_grow(*outbuf, amount);
+            }
+            str_buf_append(*outbuf, "\"",1);
+            while (j < node_data->length) {
+                count = (node_data->length-j < maxread) ? node_data->length-j : maxread;
+                assert((*outbuf)->len + count < (*outbuf)->capacity);
+                (*outbuf)->len += base64encode((char*)(*outbuf)->data + (*outbuf)->len, node_data->buff + j, count);
+                j+=count;
+            }
+            str_buf_append(*outbuf, "\"",1);
+        }
+    } else if (node_data->type == PLIST_UID) {
+        /* special case for UID nodes: create a DICT */
+        /* add CF$UID key */
+        str_buf_append(*outbuf, "CF$UID:", 17);
+
+        /* add UID value */
+        str_buf_append(*outbuf, val, val_len);
+    } else if (val) {
+        str_buf_append(*outbuf, val, val_len);
+    }
+    
+    free(val);
+
+
+    if (isStruct) {
+        /* add child nodes */
+        if (node_data->type == PLIST_DICT && node->children) {
+            assert((node->children->count % 2) == 0);
+            str_buf_append(*outbuf, "{\n", 2);
+        }
+        
+        if (node_data->type == PLIST_ARRAY) {
+            str_buf_append(*outbuf, "[", 1);
+        }
+        node_t *ch;
+        for (ch = node_first_child(node); ch; ch = node_next_sibling(ch)) {
+            char shouldAddComma = FALSE;
+            if (node_next_sibling(ch)) {
+                shouldAddComma = TRUE;
+            }
+            node_to_json(ch, outbuf, depth+1, shouldAddComma);
+        }
+       
+
+        /* fix indent for structured types */
+        for (i = 0; i < depth; i++) {
+            str_buf_append(*outbuf, "\t", 1);
+        }
+        if (node_data->type == PLIST_DICT) {
+            str_buf_append(*outbuf,"}" , 1);
+        }
+        if (node_data->type == PLIST_ARRAY) {
+            str_buf_append(*outbuf, "]", 1);
+        }
+    }
+
+    if (!isKeyNode) {
+        if (addComa) {
+            str_buf_append(*outbuf, ",\n", 2);
+        } else {
+            str_buf_append(*outbuf, "\n", 1);
+        }
+    }
+}
+
+
 static void parse_date(const char *strval, struct TM *btime)
 {
     if (!btime) return;
@@ -507,6 +777,25 @@ static void node_estimate_size(node_t *node, uint64_t *size, uint32_t depth)
         }
         *size += indent;
     }
+}
+
+PLIST_API void plist_to_json(plist_t plist, char **plist_xml, uint32_t * length)
+{
+    uint64_t size = 0;
+    node_estimate_size(plist, &size, 0);
+    size += sizeof(JSON_PLIST_PROLOG) + sizeof(JSON_PLIST_EPILOG) - 1;
+
+    strbuf_t *outbuf = str_buf_new(size);
+
+
+    node_to_json(plist, &outbuf, 0, FALSE);
+
+
+    *plist_xml = outbuf->data;
+    *length = outbuf->len - 1;
+
+    outbuf->data = NULL;
+    str_buf_free(outbuf);
 }
 
 PLIST_API void plist_to_xml(plist_t plist, char **plist_xml, uint32_t * length)
